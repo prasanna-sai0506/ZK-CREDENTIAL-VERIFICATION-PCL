@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: zkuser
+      POSTGRES_PASSWORD: zkpassword
+      POSTGRES_DB: zkcredential
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zkuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://zkuser:zkpassword@postgres:5432/zkcredential
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      S3_BUCKET: ${S3_BUCKET:-zk-cred-docs}
+      ZK_CIRCUIT_PATH: /app/circuits/build
+      VERIFIER_ADDRESS: ${VERIFIER_ADDRESS:-0x0000000000000000000000000000000000000000}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET:-supersecretjwtkey}
+    volumes:
+      - ../circuits/build:/app/circuits/build:ro
+      - blobdata:/tmp/zk-cred-blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://zkuser:zkpassword@postgres:5432/zkcredential
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      ZK_CIRCUIT_PATH: /app/circuits/build
+      VERIFIER_ADDRESS: ${VERIFIER_ADDRESS}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+    volumes:
+      - ../circuits/build:/app/circuits/build:ro
+      - blobdata:/tmp/zk-cred-blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.tasks.celery_app worker --loglevel=info --concurrency=2
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  blobdata:
